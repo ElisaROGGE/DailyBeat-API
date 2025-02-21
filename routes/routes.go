@@ -9,4 +9,5 @@ import (
 func RegisterRoutes(e *echo.Echo) {
     e.GET("/users", handlers.GetUsers)
     e.POST("/users", handlers.CreateUser)
+    e.GET("/spotify/callback", handlers.HandleSpotifyCallback) 
 }
