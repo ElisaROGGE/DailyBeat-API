@@ -1,59 +1,98 @@
 package handlers
 
 import (
+	"api/models"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/gin-gonic/gin"
 	"github.com/labstack/echo/v4"
 )
 
-// SpotifyTokenResponse structure
 type SpotifyTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
-func HandleSpotifyCallback(c echo.Context) error {
-	code := c.QueryParam("code")
-	if code == "" {
-		return c.String(http.StatusBadRequest, "Code manquant")
+func RefreshSpotifyToken(refreshToken, clientID, clientSecret string) (*SpotifyTokenResponse, error) {
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", refreshToken)
+
+	req, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token", bytes.NewBufferString(data.Encode()))
+	if err != nil {
+		return nil, err
 	}
 
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", os.Getenv("SPOTIFY_REDIRECT_URI"))
-	data.Set("client_id", os.Getenv("SPOTIFY_CLIENT_ID"))
-	data.Set("client_secret", os.Getenv("SPOTIFY_CLIENT_SECRET"))
+	credentials := base64.StdEncoding.EncodeToString([]byte(clientID + ":" + clientSecret))
+	req.Header.Set("Authorization", "Basic "+credentials)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// send request to Spotify
-	resp, err := http.PostForm("https://accounts.spotify.com/api/token", data)
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
-		return c.String(http.StatusInternalServerError, "Erreur requête Spotify")
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return c.String(http.StatusUnauthorized, "Impossible d'obtenir le token")
+	var tokenResp SpotifyTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, err
 	}
 
-	// read JSON response
-	var tokenResponse SpotifyTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
-		return c.String(http.StatusInternalServerError, "Erreur décodage JSON")
+	if tokenResp.AccessToken == "" {
+		return nil, errors.New("invalid response from Spotify")
 	}
 
-	// define HttpOnly cookie to store token
-	http.SetCookie(c.Response(), &http.Cookie{
-		Name:     "spotify_access_token",
-		Value:    tokenResponse.AccessToken,
-		Path:     "/",
-		HttpOnly: true, 
-		Secure:   true, 
-		Expires:  time.Now().Add(time.Duration(tokenResponse.ExpiresIn) * time.Second),
-	})
-
-	return c.Redirect(http.StatusSeeOther, "/")
+	return &tokenResp, nil
 }
+func GetSpotifyTokenHandler(db *gorm.DB, clientID, clientSecret string) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		uid := c.Param("uid")
+
+		var token models.SpotifyToken
+		if err := db.First(&token, "user_id = ?", uid).Error; err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Token not found"})
+		}
+
+		if time.Now().After(token.ExpiresAt) {
+			newToken, err := RefreshSpotifyToken(token.RefreshToken, clientID, clientSecret)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
+			}
+
+			token.AccessToken = newToken.AccessToken
+			token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+			token.Scope = newToken.Scope
+			token.TokenType = newToken.TokenType
+
+			if newToken.RefreshToken != "" {
+				token.RefreshToken = newToken.RefreshToken
+			}
+
+			if err := db.Save(&token).Error; err != nil {
+				return c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update token"})
+				
+			}
+		}
+
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"access_token": token.AccessToken,
+			"expires_at":   token.ExpiresAt,
+			"token_type":   token.TokenType,
+			"scope":        token.Scope,
+		})
+	}
+}
+
+
