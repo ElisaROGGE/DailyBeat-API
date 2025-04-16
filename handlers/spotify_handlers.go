@@ -6,14 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
+	"context"
 
-	"gorm.io/gorm"
-
-	"github.com/gin-gonic/gin"
 	"github.com/labstack/echo/v4"
+	"cloud.google.com/go/firestore"
 )
 
 type SpotifyTokenResponse struct {
@@ -56,21 +56,36 @@ func RefreshSpotifyToken(refreshToken, clientID, clientSecret string) (*SpotifyT
 
 	return &tokenResp, nil
 }
-func GetSpotifyTokenHandler(db *gorm.DB, clientID, clientSecret string) echo.HandlerFunc {
+
+func GetSpotifyTokenHandler(client *firestore.Client, clientID, clientSecret string) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		uid := c.Param("uid")
 
+		// search for the user in Firestore
+		docRef := client.Collection("users").Doc(uid)
+		docSnapshot, err := docRef.Get(context.Background())
+		if err != nil {
+			log.Println("Error getting user:", err)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
+		}
+
+		// extract the token from the document
 		var token models.SpotifyToken
-		if err := db.First(&token, "user_id = ?", uid).Error; err != nil {
+		if err := docSnapshot.DataTo(&token); err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "Token not found"})
 		}
 
+		log.Println("Token found:", token)
+
+		// check if the token is expired
 		if time.Now().After(token.ExpiresAt) {
 			newToken, err := RefreshSpotifyToken(token.RefreshToken, clientID, clientSecret)
 			if err != nil {
-				return c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
+				log.Println("Error refreshing token:", err)
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to refresh token"})
 			}
 
+			// update token in Firestore
 			token.AccessToken = newToken.AccessToken
 			token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
 			token.Scope = newToken.Scope
@@ -80,12 +95,15 @@ func GetSpotifyTokenHandler(db *gorm.DB, clientID, clientSecret string) echo.Han
 				token.RefreshToken = newToken.RefreshToken
 			}
 
-			if err := db.Save(&token).Error; err != nil {
-				return c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update token"})
-				
+			// save the updated token in Firestore
+			_, err = docRef.Set(context.Background(), token)
+			if err != nil {
+				log.Println("Error updating token in Firestore:", err)
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update token"})
 			}
 		}
 
+		// send the token back to the client
 		return c.JSON(http.StatusOK, map[string]interface{}{
 			"access_token": token.AccessToken,
 			"expires_at":   token.ExpiresAt,
@@ -94,5 +112,3 @@ func GetSpotifyTokenHandler(db *gorm.DB, clientID, clientSecret string) echo.Han
 		})
 	}
 }
-
-
