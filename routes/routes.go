@@ -19,5 +19,7 @@ func RegisterRoutes(e *echo.Echo, app *firebase.App, db *gorm.DB, client *firest
 	auth.Use(middleware.FirebaseAuthMiddleware(app))
 	auth.GET("/spotify-token", handlers.GetSpotifyTokenHandler(client, os.Getenv("SPOTIFY_CLIENT_ID"), os.Getenv("SPOTIFY_CLIENT_SECRET")))
 	auth.POST("/friends/request", handlers.SendFriendRequest(client))
+	auth.POST("/friends/accept", handlers.AcceptFriendRequest(client))
+
 }
 

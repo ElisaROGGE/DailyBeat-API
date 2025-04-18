@@ -36,7 +36,14 @@ func SendFriendRequest(client *firestore.Client) echo.HandlerFunc {
 		}
 
 		ctx := context.Background()
-		_, _, err := client.Collection("friendships").Add(ctx, models.Friendship{
+
+		docRef := client.Collection("users").Doc(payload.ToUID)
+		docSnap, err := docRef.Get(ctx)
+		if err != nil || !docSnap.Exists() {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Utilisateur cible introuvable"})
+		}
+
+		_, _, err = client.Collection("friendships").Add(ctx, models.Friendship{
 			From:      fromUID,
 			To:        payload.ToUID,
 			Status:    "pending",
@@ -48,6 +55,48 @@ func SendFriendRequest(client *firestore.Client) echo.HandlerFunc {
 		}
 
 		return c.JSON(http.StatusCreated, map[string]string{"message": "Demande d’ami envoyée"})
+	}
+}
+
+func AcceptFriendRequest(client *firestore.Client) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		toUID, ok := c.Get("uid").(string)
+		if !ok || toUID == "" {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Utilisateur non authentifié"})
+		}
+
+		var payload struct {
+			FromUID string `json:"fromUID"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "Payload invalide"})
+		}
+
+		if payload.FromUID == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "fromUID manquant"})
+		}
+
+		ctx := context.Background()
+
+		query := client.Collection("friendships").
+			Where("from", "==", payload.FromUID).
+			Where("to", "==", toUID).
+			Where("status", "==", "pending")
+
+		docs, err := query.Documents(ctx).GetAll()
+		if err != nil || len(docs) == 0 {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Demande d’ami non trouvée"})
+		}
+
+		_, err = docs[0].Ref.Update(ctx, []firestore.Update{
+			{Path: "status", Value: "accepted"},
+		})
+
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Échec de l’acceptation"})
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "Demande d’ami acceptée"})
 	}
 }
 
